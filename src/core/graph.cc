@@ -1,5 +1,11 @@
 #include "core/graph.h"
+#include "core/blob.h"
+#include "core/op_type.h"
+#include "core/ref.h"
+#include "operators/matmul.h"
+#include "operators/transpose.h"
 #include <algorithm>
+#include <memory>
 #include <numeric>
 #include <queue>
 
@@ -106,6 +112,167 @@ namespace infini
         // 1. 去除冗余的算子（例如，两个相邻的算子都是 transpose 算子，且做的是相反的操作，可以将其全部删除）
         // 2. 合并算子（例如，矩阵乘算子中含有属性transA、transB，如果其输入存在transpose，且对最后两个维度做交换，就可以将transpose融入到矩阵乘算子的属性中去）
         // =================================== 作业 ===================================
+        // topological sorting first
+        if (!topo_sort())
+        {
+            return;
+        }
+
+        int ops_num = ops.size();
+        for (int i = 0; i < ops_num; i++)
+        {
+            auto op = ops[i];
+            auto op_transpose = std::dynamic_pointer_cast<TransposeObj>(op);
+            // remove redundant transpose
+            if (op->getOpType() == OpType::Transpose)
+            {
+                auto input = op->getInputs()[0];
+                auto pred = input->getSource();
+                if (pred && pred->getOpType() == OpType::Transpose && input->getTargets().size() == 1)
+                {
+                    auto permute = op_transpose->getPermute();
+                    auto pred_transpose = std::dynamic_pointer_cast<TransposeObj>(pred);
+                    auto pred_permute = pred_transpose->getPermute();
+                    bool opposite = true;
+                    // merge
+                    for (int j = 0; j < int(permute.size()); j++)
+                    {
+                        permute[j] = pred_permute[permute[j]];
+                        if (permute[j] != j)
+                            opposite = false;
+                    }
+
+                    auto pred_input = pred->getInputs()[0];
+                    pred_input->removeTarget(pred);
+
+                    // opposite
+                    if (opposite)
+                    {
+                        for (auto succ : op->getSuccessors())
+                        {
+                            succ->replaceInput(op->getOutput(), pred_input);
+                            pred_input->addTarget(succ);
+                        }
+                        this->removeTensor(op->getOutput());
+                    }
+                    // merge
+                    else
+                    {
+                        auto merge_transpose = make_ref<TransposeObj>(this, pred_input, op->getOutput(), permute);
+                        this->addOperatorAndConnect(merge_transpose);
+                    }
+
+                    // delete the connection
+                    for (auto pred_pred : pred->getPredecessors())
+                    {
+                        pred_pred->removeSuccessors(pred);
+                    }
+                    for (auto succ : op->getSuccessors())
+                    {
+                        succ->removePredecessors(op);
+                    }
+
+                    // delete the tensor and operator
+                    this->removeTensor(input);
+                    this->removeOperator(op);
+                    this->removeOperator(pred);
+                    i -= 2;
+                    ops_num -= 2;
+                    continue;
+                }
+            }
+
+            // remove transpose before matmul
+            if (op->getOpType() == OpType::MatMul)
+            {
+                auto op_matmul = std::dynamic_pointer_cast<MatmulObj>(op);
+                auto A = op->getInputs(0);
+                auto B = op->getInputs(1);
+                auto pred_A = A->getSource();
+                auto pred_B = B->getSource();
+
+                // A
+                if (pred_A && pred_A->getOpType() == OpType::Transpose && A->getTargets().size() == 1)
+                {
+                    auto pred_transpose = std::dynamic_pointer_cast<TransposeObj>(pred_A);
+                    auto permute = pred_transpose->getPermute();
+                    int permute_size = permute.size();
+                    bool merge = true;
+                    for (int j = 0; j < permute_size - 2; j++)
+                    {
+                        if (permute[j] != j)
+                        {
+                            merge = false;
+                            break;
+                        }
+                    }
+
+                    // cannot merge
+                    if (!merge || permute[permute_size - 2] != permute_size - 1 || permute[permute_size - 1] != permute_size - 2)
+                        continue;
+
+                    op_matmul->setTransA(!op_matmul->getTransA());
+                    op_matmul->removePredecessors(pred_A);
+                    for (auto pred : pred_A->getPredecessors())
+                    {
+                        pred->removeSuccessors(pred_A);
+                        pred->addSuccessors(op);
+                        op->addPredecessors(pred);
+                    }
+                    // replace input
+                    auto pred_input = pred_A->getInputs(0);
+                    pred_input->removeTarget(pred_A);
+                    pred_input->addTarget(op);
+                    op_matmul->inputs[0] = pred_input;
+                    // delete tensor and operator
+                    this->removeTensor(A);
+                    this->removeOperator(pred_A);
+                    i--;
+                    ops_num--;
+                }
+
+                // B
+                if (pred_B && pred_B->getOpType() == OpType::Transpose && B->getTargets().size() == 1)
+                {
+                    auto pred_transpose = std::dynamic_pointer_cast<TransposeObj>(pred_B);
+                    auto permute = pred_transpose->getPermute();
+                    int permute_size = permute.size();
+                    bool merge = true;
+                    for (int j = 0; j < permute_size - 2; j++)
+                    {
+                        if (permute[j] != j)
+                        {
+                            merge = false;
+                            break;
+                        }
+                    }
+
+                    // cannot merge
+                    if (!merge || permute[permute_size - 2] != permute_size - 1 || permute[permute_size - 1] != permute_size - 2)
+                        continue;
+
+                    op_matmul->setTransB(!op_matmul->getTransB());
+                    op_matmul->removePredecessors(pred_B);
+                    for (auto pred : pred_B->getPredecessors())
+                    {
+                        pred->removeSuccessors(pred_B);
+                        pred->addSuccessors(op);
+                        op->addPredecessors(pred);
+                    }
+                    // replace input
+                    auto pred_input = pred_B->getInputs(0);
+                    pred_input->removeTarget(pred_B);
+                    pred_input->addTarget(op);
+                    op_matmul->inputs[1] = pred_input;
+                    // delete tensor and operator
+                    this->removeTensor(B);
+                    this->removeOperator(pred_B);
+                    i--;
+                    ops_num--;
+                }
+            }
+        }
+
     }
 
     Tensor GraphObj::getTensor(int fuid) const
@@ -153,6 +320,20 @@ namespace infini
         // HINT: 获取分配好的内存指针后，可以调用 tensor 的 setDataBlob 函数给 tensor 绑定内存
         // =================================== 作业 ===================================
 
+        // first alloc, then getPtr
+        auto n = this->tensors.size();
+        vector<size_t> offsets(n);
+        for (size_t i = 0; i < n; i++)
+        {
+            offsets[i] = this->allocator.alloc(this->tensors[i]->getBytes());
+        }
+        auto allocator_ptr = this->allocator.getPtr();
+        for (size_t i = 0; i < n; i++)
+        {
+            auto ptr = static_cast<char *>(allocator_ptr) + offsets[i];
+            auto blob = make_ref<BlobObj>(this->runtime, ptr);
+            this->tensors[i]->setDataBlob(blob);
+        }
         allocator.info();
     }
 

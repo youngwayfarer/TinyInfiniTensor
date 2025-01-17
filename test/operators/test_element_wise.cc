@@ -15,6 +15,13 @@ namespace infini {
             Tensor i0 = g->addTensor({2, 3, 3, 4}, DataType::UInt32);
             Tensor i1 = g->addTensor({2, 3, 3, 4}, DataType::UInt32);
             auto op = g->addOp<AddObj>(i0, i1, nullptr);
+            std::cout << "Output shape: ";
+            auto output = op->getOutput()->getDims();
+            for (size_t i = 0; i < output.size(); i++)
+            {
+                std::cout << output[i] << " ";
+            }
+            std::cout << std::endl;
             EXPECT_EQ(op->getOutput()->getDims(), (Shape{2, 3, 3, 4}));
         }
     }

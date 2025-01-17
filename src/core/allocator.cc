@@ -1,4 +1,5 @@
 #include "core/allocator.h"
+#include <cstddef>
 #include <utility>
 
 namespace infini
@@ -32,8 +33,47 @@ namespace infini
         // =================================== 作业 ===================================
         // TODO: 设计一个算法来分配内存，返回起始地址偏移量
         // =================================== 作业 ===================================
+        this->used += size;
 
-        return 0;
+        size_t addr = this->peak;
+        bool flag = false;
+        size_t last_addr = this->peak;
+
+        // find a free block that is large enough
+        for (auto it = free_blocks.begin(); it != free_blocks.end(); it++)
+        {
+            if (it->first + it->second == this->peak)
+            {
+                last_addr = it->first;
+                flag = true;
+            }
+
+            if (it->second >= size)
+            {
+                addr = it->first;
+                size_t block_size = it->second;
+                free_blocks.erase(it);
+                if (block_size > size)
+                {
+                    free_blocks[addr + size] = block_size - size;
+                }
+                return addr;
+            }
+        }
+
+        // if no free block is large enough, allocate a new block
+        // there is a free block that is the last block
+        if (flag)
+        {
+            // merge with the last block
+            size_t block_size = this->peak - last_addr;
+            this->peak += (size - block_size);
+            free_blocks.erase(last_addr);
+            return last_addr;
+        }
+        // allocate a new block
+        this->peak += size;
+        return addr;
     }
 
     void Allocator::free(size_t addr, size_t size)
@@ -44,6 +84,31 @@ namespace infini
         // =================================== 作业 ===================================
         // TODO: 设计一个算法来回收内存
         // =================================== 作业 ===================================
+        if (addr + size == this->peak)
+        {
+            this->peak -= size;
+            return;
+        }
+
+        for (auto it = free_blocks.begin(); it != free_blocks.end(); it++)
+        {
+            // merge with the previous block
+            if (it->first + it->second == addr)
+            {
+                addr = it->first;
+                size += it->second;
+                free_blocks.erase(it);
+            }
+
+            // merge with the next block
+            if (addr + size == it->first)
+            {
+                size += it->second;
+                free_blocks.erase(it);
+            }
+        }
+
+        free_blocks[addr] = size;
     }
 
     void *Allocator::getPtr()
